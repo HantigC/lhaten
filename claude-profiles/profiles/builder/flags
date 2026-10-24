@@ -1,0 +1,2 @@
+# Extra claude CLI flags for this profile, one group per line
+--model sonnet

@@ -1,0 +1,4 @@
+# Items from library/ that this profile loads (one per line, path relative to library/)
+agents/scaffolder.md
+skills/project-scaffold
+commands/init-project.md

@@ -1,0 +1,3 @@
+# Items from library/ that this profile loads (one per line, path relative to library/)
+agents/reviewer.md
+commands/review.md

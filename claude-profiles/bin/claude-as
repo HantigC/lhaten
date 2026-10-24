@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# claude-as: run Claude Code with an isolated, minimal profile.
+#
+#   claude-as builder            start a session using the "builder" profile
+#   claude-as dev -p "..."       extra args are passed through to claude
+#   claude-as --list             list profiles
+#   claude-as --sync [name|--all] rebuild runtime dirs without launching
+#
+# Each profile gets its own CLAUDE_CONFIG_DIR, so nothing from ~/.claude
+# (agents, skills, commands, CLAUDE.md) is loaded unless the profile asks for it.
+set -euo pipefail
+
+SRC="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+RUNTIME="${CLAUDE_PROFILES_HOME:-$HOME/.claude-profiles}"
+CLAUDE_BIN="${CLAUDE_BIN:-claude}"
+MANAGED_DIRS=(agents skills commands output-styles)
+
+die() { echo "claude-as: $*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+usage:
+  claude-as <profile> [claude args...]   launch Claude Code with a profile
+  claude-as --list                       list available profiles
+  claude-as --sync [<profile>|--all]     rebuild runtime config dirs only
+  claude-as --path <profile>             print the profile's runtime config dir
+  claude-as --help
+
+env:
+  CLAUDE_PROFILES_HOME   where runtime dirs live (default: ~/.claude-profiles)
+  CLAUDE_BIN             claude executable (default: claude)
+EOF
+}
+
+list_profiles() {
+  local d
+  for d in "$SRC"/profiles/*/; do
+    [ -d "$d" ] && basename "$d"
+  done
+}
+
+trim() {
+  local s="$1"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+sync_profile() {
+  local name="$1" src dst d f line item
+  src="$SRC/profiles/$name"
+  dst="$RUNTIME/$name"
+  [ -d "$src" ] || die "no such profile: $name (try --list)"
+
+  mkdir -p "$dst"
+
+  # Remove previously managed links so items dropped from the manifest disappear.
+  for d in "${MANAGED_DIRS[@]}"; do
+    mkdir -p "$dst/$d"
+    find "$dst/$d" -mindepth 1 -maxdepth 1 -type l -delete
+  done
+
+  # Top-level config files.
+  for f in settings.json CLAUDE.md; do
+    if [ -f "$src/$f" ]; then
+      ln -sfn "$src/$f" "$dst/$f"
+    else
+      rm -f "$dst/$f"
+    fi
+  done
+
+  # Items pulled from the shared library via the manifest.
+  if [ -f "$src/manifest" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line%%#*}"
+      line="$(trim "$line")"
+      [ -z "$line" ] && continue
+      case "$line" in
+        /*|*..*) die "profile '$name': invalid manifest path: $line" ;;
+      esac
+      item="$SRC/library/$line"
+      [ -e "$item" ] || die "profile '$name': not in library: $line"
+      mkdir -p "$dst/$(dirname "$line")"
+      ln -sfn "$item" "$dst/$line"
+    done < "$src/manifest"
+  fi
+
+  # Items that live only inside the profile.
+  for d in "${MANAGED_DIRS[@]}"; do
+    [ -d "$src/$d" ] || continue
+    for item in "$src/$d"/*; do
+      [ -e "$item" ] || continue
+      ln -sfn "$item" "$dst/$d/$(basename "$item")"
+    done
+  done
+
+  # Reuse existing login where credentials are stored as a file (Linux).
+  if [ -f "$HOME/.claude/.credentials.json" ] && [ ! -e "$dst/.credentials.json" ]; then
+    ln -s "$HOME/.claude/.credentials.json" "$dst/.credentials.json"
+  fi
+}
+
+launch() {
+  local name="$1"; shift
+  local src="$SRC/profiles/$name" line
+  local -a args=() extra=()
+
+  command -v "$CLAUDE_BIN" >/dev/null 2>&1 || die "'$CLAUDE_BIN' not found on PATH"
+  sync_profile "$name"
+
+  export CLAUDE_CONFIG_DIR="$RUNTIME/$name"
+  export CLAUDE_AS_PROFILE="$name"
+
+  if [ -f "$src/mcp.json" ]; then
+    args+=(--mcp-config "$src/mcp.json" --strict-mcp-config)
+  fi
+
+  # Optional extra flags, one line per group, e.g. "--model sonnet".
+  if [ -f "$src/flags" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line%%#*}"
+      line="$(trim "$line")"
+      [ -z "$line" ] && continue
+      read -r -a extra <<< "$line"
+      args+=("${extra[@]}")
+    done < "$src/flags"
+  fi
+
+  exec "$CLAUDE_BIN" ${args[@]+"${args[@]}"} "$@"
+}
+
+case "${1:-}" in
+  ""|-h|--help) usage ;;
+  --list) list_profiles ;;
+  --path) shift; [ $# -ge 1 ] || die "--path needs a profile name"; echo "$RUNTIME/$1" ;;
+  --sync)
+    shift
+    if [ $# -eq 0 ] || [ "$1" = "--all" ]; then
+      for p in $(list_profiles); do sync_profile "$p"; done
+    else
+      sync_profile "$1"
+    fi
+    ;;
+  -*) die "unknown option: $1" ;;
+  *) profile="$1"; shift; launch "$profile" "$@" ;;
+esac
